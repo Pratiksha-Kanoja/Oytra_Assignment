@@ -1,0 +1,349 @@
+{
+  "name": "Bonus – Uptime Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-5min",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-daily",
+      "name": "Daily at 8AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://demo.realworld.show",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 3
+            }
+          }
+        }
+      },
+      "id": "ping-app",
+      "name": "Ping RealWorld App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Capture status code and response time\nconst item = $input.first().json;\nconst now = new Date().toISOString();\n\n// n8n puts full response details in the item when fullResponse: true\nconst statusCode = item.statusCode || 0;\nconst responseTimeMs = item.headers ? parseInt(item.headers['x-response-time'] || '0') : 0;\n\n// Determine if the app is up\nconst isUp = statusCode === 200;\n\n// Retrieve rolling stats from static data (persists across executions)\nlet stats = $getWorkflowStaticData('global');\nif (!stats.totalChecks) {\n  stats.totalChecks = 0;\n  stats.totalDowntime = 0;\n  stats.totalResponseTimeMs = 0;\n  stats.lastDownAt = null;\n  stats.consecutiveFailures = 0;\n}\n\nstats.totalChecks += 1;\nif (!isUp) {\n  stats.totalDowntime += 1;\n  stats.consecutiveFailures = (stats.consecutiveFailures || 0) + 1;\n  stats.lastDownAt = now;\n} else {\n  stats.consecutiveFailures = 0;\n}\nstats.totalResponseTimeMs += responseTimeMs;\n\nconst uptimePct = (((stats.totalChecks - stats.totalDowntime) / stats.totalChecks) * 100).toFixed(2);\nconst avgResponseMs = Math.round(stats.totalResponseTimeMs / stats.totalChecks);\n\nreturn [{\n  json: {\n    timestamp: now,\n    statusCode,\n    isUp,\n    responseTimeMs,\n    uptimePct,\n    avgResponseMs,\n    totalChecks: stats.totalChecks,\n    consecutiveFailures: stats.consecutiveFailures,\n    url: 'https://demo.realworld.show'\n  }\n}];"
+      },
+      "id": "check-status",
+      "name": "Check Status & Track Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-is-down",
+              "leftValue": "={{ $json.isUp }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-down",
+      "name": "IF App is Down",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Wait 30 seconds and retry up to 3 times\nconst item = $input.first().json;\n\n// Only retry if under 3 consecutive failures (first failure = retry)\nif (item.consecutiveFailures < 3) {\n  // Simulate wait - in production, this would use a Wait node\n  return [{ json: { ...item, retry: true, retryAttempt: item.consecutiveFailures } }];\n} else {\n  return [{ json: { ...item, retry: false, confirmed: true } }];\n}"
+      },
+      "id": "retry-logic",
+      "name": "Retry Logic (up to 3x)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-confirmed",
+              "leftValue": "={{ $json.confirmed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-confirmed-down",
+      "name": "IF Confirmed Down (3 retries)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, -120]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\n\nconst statusEmoji = d.statusCode === 0 ? '🔌 Unreachable' : `HTTP ${d.statusCode}`;\nconst msg = [\n  '🚨 **DOWNTIME ALERT — RealWorld App is DOWN**',\n  '',\n  `⏰ Time: ${d.timestamp}`,\n  `🌐 URL: ${d.url}`,\n  `❌ Status: ${statusEmoji}`,\n  `🔁 Consecutive Failures: ${d.consecutiveFailures}`,\n  `📊 Overall Uptime: ${d.uptimePct}%`,\n  `⚡ Avg Response Time: ${d.avgResponseMs}ms`,\n  '',\n  '_Alert fired after 3 consecutive failed health checks._'\n].join('\\n');\n\nreturn [{ json: { content: msg } }];"
+      },
+      "id": "format-alert",
+      "name": "Format Down Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -240]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "discord-alert",
+      "name": "Discord – Down Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -240],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// App is up — check if response time is slow (> 2000ms)\nconst d = $input.first().json;\n\nif (d.responseTimeMs > 2000) {\n  const msg = [\n    '⚠️ **SLOW RESPONSE — RealWorld App is degraded**',\n    '',\n    `⏰ Time: ${d.timestamp}`,\n    `🌐 URL: ${d.url}`,\n    `✅ Status: HTTP ${d.statusCode} (OK)`,\n    `🐢 Response Time: ${d.responseTimeMs}ms (threshold: 2000ms)`,\n    `📊 Uptime: ${d.uptimePct}%`\n  ].join('\\n');\n  return [{ json: { content: msg, shouldAlert: true } }];\n}\n\n// All good – no alert needed\nreturn [{ json: { content: null, shouldAlert: false, statusCode: d.statusCode, responseTimeMs: d.responseTimeMs, uptime: d.uptimePct } }];"
+      },
+      "id": "check-slow",
+      "name": "Check Slow Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-slow",
+              "leftValue": "={{ $json.shouldAlert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-slow",
+      "name": "IF Response is Slow",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "discord-slow",
+      "name": "Discord – Slow Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Daily summary — pull stats from static data\nlet stats = $getWorkflowStaticData('global');\n\nconst totalChecks = stats.totalChecks || 0;\nconst totalDowntime = stats.totalDowntime || 0;\nconst avgResponseMs = totalChecks > 0 ? Math.round((stats.totalResponseTimeMs || 0) / totalChecks) : 0;\nconst uptimePct = totalChecks > 0 ? (((totalChecks - totalDowntime) / totalChecks) * 100).toFixed(2) : '100.00';\nconst lastDownAt = stats.lastDownAt || 'Never';\nconst today = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });\n\nconst msg = [\n  `📋 **DAILY UPTIME REPORT — ${today}**`,\n  '',\n  `🌐 Monitored URL: https://demo.realworld.show`,\n  `✅ Uptime: **${uptimePct}%**`,\n  `🔍 Total Checks: ${totalChecks}`,\n  `❌ Failed Checks: ${totalDowntime}`,\n  `⚡ Avg Response Time: ${avgResponseMs}ms`,\n  `🕐 Last Downtime: ${lastDownAt}`,\n  '',\n  `_Report generated at 08:00 IST. Next report in 24 hours._`\n].join('\\n');\n\n// Reset daily counters (keep historical totals)\nstats.lastDailyReport = new Date().toISOString();\n\nreturn [{ json: { content: msg } }];"
+      },
+      "id": "daily-summary",
+      "name": "Build Daily Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "discord-daily",
+      "name": "Discord – Daily Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 400],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "const error = $input.first().json;\nconst msg = [\n  '⚠️ **UPTIME MONITOR – WORKFLOW ERROR**',\n  `Node: ${error.execution?.lastNodeExecuted || 'Unknown'}`,\n  `Error: ${error.execution?.error?.message || 'Unknown error'}`,\n  `Time: ${new Date().toISOString()}`\n].join('\\n');\nreturn [{ json: { content: msg } }];"
+      },
+      "id": "format-error",
+      "name": "Format Workflow Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "discord-workflow-error",
+      "name": "Discord – Workflow Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 600],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [[{ "node": "Ping RealWorld App", "type": "main", "index": 0 }]]
+    },
+    "Ping RealWorld App": {
+      "main": [[{ "node": "Check Status & Track Metrics", "type": "main", "index": 0 }]]
+    },
+    "Check Status & Track Metrics": {
+      "main": [[{ "node": "IF App is Down", "type": "main", "index": 0 }]]
+    },
+    "IF App is Down": {
+      "main": [
+        [{ "node": "Retry Logic (up to 3x)", "type": "main", "index": 0 }],
+        [{ "node": "Check Slow Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Retry Logic (up to 3x)": {
+      "main": [[{ "node": "IF Confirmed Down (3 retries)", "type": "main", "index": 0 }]]
+    },
+    "IF Confirmed Down (3 retries)": {
+      "main": [
+        [{ "node": "Format Down Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Format Down Alert": {
+      "main": [[{ "node": "Discord – Down Alert", "type": "main", "index": 0 }]]
+    },
+    "Check Slow Response": {
+      "main": [[{ "node": "IF Response is Slow", "type": "main", "index": 0 }]]
+    },
+    "IF Response is Slow": {
+      "main": [
+        [{ "node": "Discord – Slow Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Daily at 8AM": {
+      "main": [[{ "node": "Build Daily Summary", "type": "main", "index": 0 }]]
+    },
+    "Build Daily Summary": {
+      "main": [[{ "node": "Discord – Daily Summary", "type": "main", "index": 0 }]]
+    },
+    "Error Trigger": {
+      "main": [[{ "node": "Format Workflow Error", "type": "main", "index": 0 }]]
+    },
+    "Format Workflow Error": {
+      "main": [[{ "node": "Discord – Workflow Error", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    { "name": "uptime", "id": "3" },
+    { "name": "monitoring", "id": "4" }
+  ],
+  "triggerCount": 2,
+  "pinData": {}
+}

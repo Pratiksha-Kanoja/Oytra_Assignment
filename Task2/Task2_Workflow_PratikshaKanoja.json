@@ -1,0 +1,381 @@
+{
+  "name": "Daily GitHub Trending Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/repositories",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "created:>={{$now.minus({days:1}).toFormat('yyyy-MM-dd')}}"
+            },
+            {
+              "name": "sort",
+              "value": "stars"
+            },
+            {
+              "name": "order",
+              "value": "desc"
+            },
+            {
+              "name": "per_page",
+              "value": "10"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "id": "fetch-trending-repos",
+      "name": "Fetch Trending Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transform: keep only the top 5 repos and extract key fields\nconst input = $input.first().json;\n\n// Check if the API call failed\nif (input.error || !input.items) {\n  return [{ json: { error: true, message: input.message || 'GitHub API request failed' } }];\n}\n\nconst top5 = input.items.slice(0, 5).map((repo, index) => ({\n  rank: index + 1,\n  name: repo.full_name,\n  description: repo.description || 'No description',\n  stars: repo.stargazers_count,\n  forks: repo.forks_count,\n  language: repo.language || 'Unknown',\n  url: repo.html_url,\n  owner: repo.owner.login,\n  repo_name: repo.name,\n  created_at: repo.created_at\n}));\n\nreturn top5.map(item => ({ json: item }));"
+      },
+      "id": "transform-top5",
+      "name": "Transform Top 5",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.name }}/readme",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.v3+json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false
+            }
+          }
+        }
+      },
+      "id": "fetch-readme",
+      "name": "Enrich – Fetch README",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0],
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge the README info into each repo item\nconst items = $input.all();\n\nreturn items.map(item => {\n  const data = item.json;\n  let readmeSnippet = 'README not available';\n\n  if (data.content) {\n    // README content is base64 encoded; decode and take first 200 chars\n    try {\n      const decoded = Buffer.from(data.content, 'base64').toString('utf-8');\n      readmeSnippet = decoded.substring(0, 200).replace(/\\n/g, ' ').trim() + '...';\n    } catch (e) {\n      readmeSnippet = 'Could not decode README';\n    }\n  }\n\n  return {\n    json: {\n      ...data,\n      readme_snippet: readmeSnippet\n    }\n  };\n});"
+      },
+      "id": "merge-readme",
+      "name": "Merge README Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-stars",
+              "leftValue": "={{ $json.stars }}",
+              "rightValue": 1000,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-stars-gt-1000",
+      "name": "IF stars > 1000",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format a rich digest message for repos with > 1000 stars\nconst items = $input.all();\n\nlet message = '🔥 **HIGH-STAR REPOS (>1000 ⭐)**\\n\\n';\n\nitems.forEach(item => {\n  const r = item.json;\n  message += `**#${r.rank} ${r.name}** — ⭐ ${r.stars} | 🍴 ${r.forks}\\n`;\n  message += `> ${r.description}\\n`;\n  message += `> Language: ${r.language} | ${r.url}\\n`;\n  message += `> README: ${r.readme_snippet}\\n\\n`;\n});\n\nreturn [{ json: { content: message } }];"
+      },
+      "id": "format-high-stars",
+      "name": "Format High-Star Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format a digest message for repos with <= 1000 stars\nconst items = $input.all();\n\nlet message = '📊 **TRENDING REPOS (≤1000 ⭐)**\\n\\n';\n\nitems.forEach(item => {\n  const r = item.json;\n  message += `**#${r.rank} ${r.name}** — ⭐ ${r.stars} | 🍴 ${r.forks}\\n`;\n  message += `> ${r.description}\\n`;\n  message += `> Language: ${r.language} | ${r.url}\\n\\n`;\n});\n\nreturn [{ json: { content: message } }];"
+      },
+      "id": "format-low-stars",
+      "name": "Format Regular Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "discord-high-stars",
+      "name": "Discord – Hot Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -120],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "discord-webhook-cred",
+          "name": "Discord Webhook"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content }) }}",
+        "options": {}
+      },
+      "id": "discord-regular",
+      "name": "Discord – Regular Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 120],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "discord-webhook-cred",
+          "name": "Discord Webhook"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log the error details for debugging\nconst error = $input.first().json;\n\nconst errorLog = {\n  timestamp: new Date().toISOString(),\n  workflow: 'Daily GitHub Trending Digest',\n  errorMessage: error.execution?.error?.message || 'Unknown error',\n  nodeName: error.execution?.lastNodeExecuted || 'Unknown',\n  executionId: error.execution?.id || 'N/A'\n};\n\nconsole.log('WORKFLOW ERROR:', JSON.stringify(errorLog));\n\nreturn [{ json: errorLog }];"
+      },
+      "id": "log-error",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: '⚠️ **WORKFLOW ERROR**\\nNode: ' + $json.nodeName + '\\nError: ' + $json.errorMessage + '\\nTime: ' + $json.timestamp }) }}",
+        "options": {}
+      },
+      "id": "discord-error",
+      "name": "Discord – Error Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "discord-webhook-cred",
+          "name": "Discord Webhook"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Trending Repos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Trending Repos": {
+      "main": [
+        [
+          {
+            "node": "Transform Top 5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Top 5": {
+      "main": [
+        [
+          {
+            "node": "Enrich – Fetch README",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich – Fetch README": {
+      "main": [
+        [
+          {
+            "node": "Merge README Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge README Data": {
+      "main": [
+        [
+          {
+            "node": "IF stars > 1000",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF stars > 1000": {
+      "main": [
+        [
+          {
+            "node": "Format High-Star Digest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Regular Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format High-Star Digest": {
+      "main": [
+        [
+          {
+            "node": "Discord – Hot Repos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Regular Digest": {
+      "main": [
+        [
+          {
+            "node": "Discord – Regular Repos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Error": {
+      "main": [
+        [
+          {
+            "node": "Discord – Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "automation",
+      "id": "1"
+    },
+    {
+      "name": "github",
+      "id": "2"
+    }
+  ],
+  "triggerCount": 1,
+  "pinData": {}
+}
